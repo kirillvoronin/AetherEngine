@@ -2088,14 +2088,10 @@ final class SoftwarePlaybackHost {
         // lockstep pacing: their delivery is origin-paced realtime, and the ones that need a
         // pump get it from the DVR feeder arm on its own thread.
         var parkedVideo: [UnsafeMutablePointer<AVPacket>] = []
-        let parkedVideoCap = 256
+        var parkedVideoBytes = 0
         var terminalGeneration = SoftwareTerminalGeneration()
         var lastEnqueuedAudioPtsSec = Double.nan
-        var rebuffering = false
-        // The pause/rebuffer arm stays off until the source has proven it can deliver a real
-        // lead once: an exactly-realtime origin whose lead never leaves the start offset must
-        // not eat a rebuffer pause at every session start.
-        var everHadLead = false
+        var rebufferGate = SoftwareVODRebufferGate()
         var parkedSeekGeneration = seekGeneration()
         let decoupleAudio = !isLive && audioDecoder != nil && audioOutput != nil
 
@@ -2105,6 +2101,7 @@ final class SoftwarePlaybackHost {
                 av_packet_free_safe(p)
             }
             parkedVideo.removeAll()
+            parkedVideoBytes = 0
         }
 
         // Decode+enqueue parked video while the renderer will take it. Never blocks.
@@ -2131,6 +2128,7 @@ final class SoftwarePlaybackHost {
                 // once it has read the new generation.
                 if seekGeneration() != parkedSeekGeneration { return }
                 let p = parkedVideo.removeFirst()
+                parkedVideoBytes -= Int(p.pointee.size)
                 setDecodeGeneration(parkedSeekGeneration)
                 videoDecoder.decode(packet: p, epoch: epoch)
                 av_packet_unref(p)
@@ -2139,8 +2137,7 @@ final class SoftwarePlaybackHost {
         }
 
         func releaseRebufferHold(_ why: String) {
-            guard rebuffering else { return }
-            rebuffering = false
+            guard rebufferGate.releaseForDrain() else { return }
             EngineLog.emit("[SWHost] releasing rebuffer hold: \(why)", category: .swPlayback)
             audioOutput?.setRate(currentRate())
         }
@@ -2182,7 +2179,9 @@ final class SoftwarePlaybackHost {
                 switch reason {
                 case .readGate:
                     return Self.shouldHoldDemuxRead(
-                        parkedCount: parkedVideo.count, parkedCap: parkedVideoCap,
+                        parkedCount: parkedVideo.count,
+                        parkedCap: rebufferGate.parkedCap(
+                            parkedCount: parkedVideo.count, parkedBytes: parkedVideoBytes),
                         clockArmed: clockArmed(), lastAudioPts: lastEnqueuedAudioPtsSec,
                         clockSeconds: audioOutput?.currentTimeSeconds ?? .nan)
                 case .drainAll:
@@ -2201,38 +2200,35 @@ final class SoftwarePlaybackHost {
                     condition.unlock()
                     continue
                 }
-                releaseRebufferHold("the renderer needs a running clock to take parked video")
+                if reason == .drainAll {
+                    releaseRebufferHold("the renderer needs a running clock to take parked video")
+                } else if rebufferGate.releaseForRendererWait(
+                    parkedCount: parkedVideo.count, parkedBytes: parkedVideoBytes) {
+                    EngineLog.emit(
+                        "[SWHost] releasing rebuffer hold: the renderer needs a running clock to take "
+                        + "parked video (\(parkedVideo.count) packets, \(parkedVideoBytes) bytes parked)",
+                        category: .swPlayback
+                    )
+                    audioOutput?.setRate(currentRate())
+                }
                 armFromParkedVideoIfStuck()
                 drainParkedVideoNonblocking()
                 diag?.update(lastAudioPts: lastEnqueuedAudioPtsSec,
-                             parked: parkedVideo.count, rebuffering: rebuffering,
+                             parked: parkedVideo.count, rebuffering: rebufferGate.rebuffering,
                              generation: parkedSeekGeneration)
                 if stillWaiting() { Thread.sleep(forTimeInterval: 0.005) }
             }
         }
 
-        // Pause the master clock when the audio lead is genuinely exhausted, resume once the
-        // rebuffer target is met. In this loop there is no ring to distinguish decode lag
-        // from a dry source, so a sub-threshold lead IS treated as source-starved - the
-        // everHadLead latch keeps that from firing on realtime-paced sources that never had
-        // a lead to lose.
-        func applyAudioClockAction() {
+        func applyAudioClockAction(sourceDry: Bool?) {
             guard decoupleAudio, clockArmed(), let aOut = audioOutput else { return }
             let lead = lastEnqueuedAudioPtsSec.isFinite
                 ? lastEnqueuedAudioPtsSec - aOut.currentTimeSeconds : 0
-            if lead >= AudioLookaheadPolicy.rebufferResumeLeadSeconds { everHadLead = true }
-            guard everHadLead, isPlaying() || rebuffering else { return }
-            switch AudioLookaheadPolicy.clockAction(
-                rebuffering: rebuffering,
-                lastFedAudioPTS: lastEnqueuedAudioPtsSec,
-                clockSeconds: aOut.currentTimeSeconds,
-                atRingEnd: true,
-                // End of media releases the hold explicitly in the read path below; there is no
-                // ring here whose end this could be read from.
-                sourceEnded: false
+            switch rebufferGate.evaluate(
+                lead: lead, isPlaying: isPlaying(), sourceDry: sourceDry,
+                parkedCount: parkedVideo.count
             ) {
             case .pauseForRebuffer:
-                rebuffering = true
                 EngineLog.emit(
                     "[SWHost] audio lead exhausted (\(String(format: "%.2f", lead))s); "
                     + "pausing clock for rebuffer",
@@ -2240,7 +2236,6 @@ final class SoftwarePlaybackHost {
                 )
                 aOut.pause()
             case .resume:
-                rebuffering = false
                 EngineLog.emit(
                     "[SWHost] rebuffered to \(String(format: "%.2f", lead))s audio lead; "
                     + "resuming clock",
@@ -2305,19 +2300,18 @@ final class SoftwarePlaybackHost {
                     parkedSeekGeneration = gen
                     freeParkedVideo()
                     lastEnqueuedAudioPtsSec = .nan
-                    rebuffering = false
-                    // The lead is zero again after a seek, so the latch has to earn itself back:
-                    // keeping it set pauses the clock for a rebuffer on the first post-seek check.
-                    everHadLead = false
+                    rebufferGate.reset()
                 }
                 drainParkedVideoNonblocking()
-                applyAudioClockAction()
+                applyAudioClockAction(sourceDry: readAhead?.isDry)
                 // Read gate: stop pulling once decoded audio holds its target lead. The FIFO cap
                 // is the memory backstop, not the pacing rule - what bounds the lead has to be
                 // the lead itself, or the effective ceiling becomes "however many seconds of
                 // video fit in 256 packets" and moves with frame rate.
                 if Self.shouldHoldDemuxRead(
-                    parkedCount: parkedVideo.count, parkedCap: parkedVideoCap,
+                    parkedCount: parkedVideo.count,
+                    parkedCap: rebufferGate.parkedCap(
+                        parkedCount: parkedVideo.count, parkedBytes: parkedVideoBytes),
                     clockArmed: clockArmed(), lastAudioPts: lastEnqueuedAudioPtsSec,
                     clockSeconds: audioOutput?.currentTimeSeconds ?? .nan) {
                     waitForRenderer(.readGate)
@@ -2467,6 +2461,7 @@ final class SoftwarePlaybackHost {
                     // Park; the drains at the iteration top and the bounded-park gate feed the
                     // renderer. Ownership moves to the FIFO - no free here.
                     parkedVideo.append(packet)
+                    parkedVideoBytes += Int(packet.pointee.size)
                     // Broken-audio clock-arming fallback still applies (decoupleAudio only
                     // requires a DECLARED audio track, not a producing one). The stream that
                     // produces NO packets at all is #337's case and exits at the read gate.
@@ -2620,7 +2615,7 @@ final class SoftwarePlaybackHost {
             }
             diag?.update(lastAudioPts: lastEnqueuedAudioPtsSec,
                          parked: parkedVideo.count,
-                         rebuffering: rebuffering,
+                         rebuffering: rebufferGate.rebuffering,
                          generation: parkedSeekGeneration)
             if !keepGoing { break }
         }

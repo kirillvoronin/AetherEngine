@@ -122,6 +122,11 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
                         cacheSeekMisses: cacheSeekMisses)
     }
 
+    var isDry: Bool {
+        condition.lock(); defer { condition.unlock() }
+        return count == 0 && !ended && failure == nil && !closed
+    }
+
     /// Main-thread safe: metadata only. Decode/render backpressure still belongs to the old loop.
     func updatePlayhead(_ seconds: Double) {
         guard seconds.isFinite else { return }
