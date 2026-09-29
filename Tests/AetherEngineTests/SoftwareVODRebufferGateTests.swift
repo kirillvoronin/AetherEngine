@@ -124,3 +124,108 @@ struct SoftwareVODRebufferGatePauseTests {
         #expect(action12 == .none)
     }
 }
+
+@Suite("SW VOD rebuffer hold resumes only when the store is likely to keep up")
+struct SoftwareVODRebufferResumeTargetTests {
+
+    private typealias Fill = SoftwareVODRebufferGate.SourceFill
+    private let audioLead = AudioLookaheadPolicy.targetLeadSeconds
+
+    private func engaged() -> SoftwareVODRebufferGate {
+        var gate = SoftwareVODRebufferGate()
+        _ = gate.evaluate(lead: AudioLookaheadPolicy.rebufferResumeLeadSeconds, isPlaying: true,
+                          sourceDry: false, parkedCount: 0)
+        let action = gate.evaluate(lead: 0.05, isPlaying: true, sourceDry: true, parkedCount: 10)
+        #expect(action == .pauseForRebuffer)
+        return gate
+    }
+
+    private func resumes(_ fill: Fill?, audioLead: Double? = nil) -> Bool {
+        var gate = engaged()
+        let action = gate.evaluate(lead: audioLead ?? self.audioLead, isPlaying: true,
+                                   sourceDry: false, parkedCount: 60, fill: fill)
+        return action == .resume
+    }
+
+    @Test("two seconds of audio is not enough while the store holds a few seconds")
+    func noResumeOnTheOldTwoSeconds() {
+        #expect(!resumes(Fill(bufferedLead: 3, fillRate: 0.85, canGrow: true)))
+        #expect(!resumes(Fill(bufferedLead: 9.9, fillRate: 0.85, canGrow: true)))
+    }
+
+    @Test("a source at 85 % of the bitrate resumes at ten seconds, which lasts over a minute")
+    func nearRealtimeResumesAtTheFloor() {
+        #expect(resumes(Fill(bufferedLead: 10, fillRate: 0.85, canGrow: true)))
+    }
+
+    @Test("a source at a quarter of the bitrate waits until the lead outlasts thirty seconds")
+    func slowSourceWaitsForTheHorizon() {
+        #expect(!resumes(Fill(bufferedLead: 10, fillRate: 0.25, canGrow: true)))
+        #expect(!resumes(Fill(bufferedLead: 22, fillRate: 0.25, canGrow: true)))
+        #expect(resumes(Fill(bufferedLead: 22.5, fillRate: 0.25, canGrow: true)))
+    }
+
+    @Test("a source that keeps up resumes at the floor")
+    func keepingUpResumesAtTheFloor() {
+        #expect(resumes(Fill(bufferedLead: 10, fillRate: 1.3, canGrow: true)))
+    }
+
+    @Test("a stalled or unmeasured source still resumes at the thirty-second cap")
+    func capBoundsTheWait() {
+        #expect(!resumes(Fill(bufferedLead: 29.9, fillRate: 0, canGrow: true)))
+        #expect(resumes(Fill(bufferedLead: 30, fillRate: 0, canGrow: true)))
+        #expect(!resumes(Fill(bufferedLead: 20, fillRate: nil, canGrow: true)))
+        #expect(resumes(Fill(bufferedLead: 30, fillRate: nil, canGrow: true)))
+    }
+
+    @Test("a store that cannot grow any more resumes on the audio lead")
+    func fullOrEndedStoreResumes() {
+        #expect(resumes(Fill(bufferedLead: 3, fillRate: 0.2, canGrow: false)))
+    }
+
+    @Test("the audio lead is still required before the clock runs")
+    func audioLeadStillRequired() {
+        #expect(!resumes(Fill(bufferedLead: 30, fillRate: 1, canGrow: true), audioLead: 1))
+    }
+
+    @Test("a session without a packet store keeps the audio-lead resume")
+    func noStoreKeepsTheAudioRule() {
+        #expect(resumes(nil, audioLead: AudioLookaheadPolicy.rebufferResumeLeadSeconds))
+    }
+}
+
+@Suite("Source fill rate over a recent window")
+struct SourceFillRateMeterTests {
+
+    @Test("media seconds stored per wall second, once the window spans two seconds")
+    func measuresTheRate() {
+        var meter = SourceFillRateMeter()
+        meter.record(mediaSeconds: 100, at: 0)
+        meter.record(mediaSeconds: 100.4, at: 1)
+        #expect(meter.rate == nil)
+        meter.record(mediaSeconds: 101.7, at: 2)
+        #expect(abs((meter.rate ?? -1) - 0.85) < 0.001)
+    }
+
+    @Test("old samples leave the window, so a slowdown shows within it")
+    func windowForgets() {
+        var meter = SourceFillRateMeter()
+        var media = 0.0
+        for second in 0...20 {
+            media += second <= 10 ? 2 : 0.25
+            meter.record(mediaSeconds: media, at: Double(second))
+        }
+        #expect(abs((meter.rate ?? -1) - 0.25) < 0.001)
+    }
+
+    @Test("samples closer than the spacing are ignored and a reset forgets everything")
+    func spacingAndReset() {
+        var meter = SourceFillRateMeter()
+        meter.record(mediaSeconds: 0, at: 0)
+        meter.record(mediaSeconds: 50, at: 0.1)
+        meter.record(mediaSeconds: 2, at: 2)
+        #expect(abs((meter.rate ?? -1) - 1) < 0.001)
+        meter.reset()
+        #expect(meter.rate == nil)
+    }
+}

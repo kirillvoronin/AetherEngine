@@ -10,6 +10,20 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [6.88.0-tvseerr.2] - 2026-09-29 (fork)
+
+### Changed
+
+- **The software path's rebuffer hold resumes only when the source is likely to keep up.** It used
+  to resume on 2 s of decoded audio, which on a source at ~85 % of the bitrate (150 KB/s against
+  ~172 KB/s) meant a 1.5-3 s pause every 3-12 s. The hold now waits until the packet store holds at
+  least 10 s ahead of the clock and, at the fill rate measured over the last 8 s (media seconds
+  stored per wall second), that lead lasts at least 30 s (`lead / (1 - rate)`), or until 30 s are
+  stored whatever the rate. A store that cannot grow (source ended, forward window or byte budget
+  full) and a session without a store keep the 2 s audio rule. The resume is also checked while the
+  loop waits at the audio read gate, which a held clock never drains. Engage rules and the
+  backstop hysteresis are unchanged.
+
 ## [6.88.0-tvseerr.1] - 2026-09-29 (fork)
 
 ### Fixed

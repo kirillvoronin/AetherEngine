@@ -2093,6 +2093,7 @@ final class SoftwarePlaybackHost {
         var terminalGeneration = SoftwareTerminalGeneration()
         var lastEnqueuedAudioPtsSec = Double.nan
         var rebufferGate = SoftwareVODRebufferGate()
+        var fillMeter = SourceFillRateMeter()
         var parkedSeekGeneration = seekGeneration()
         let decoupleAudio = !isLive && audioDecoder != nil && audioOutput != nil
 
@@ -2214,6 +2215,10 @@ final class SoftwarePlaybackHost {
                 }
                 armFromParkedVideoIfStuck()
                 drainParkedVideoNonblocking()
+                // A held clock never drains the audio lead that parks this wait, so the resume is checked here.
+                if reason == .readGate, rebufferGate.rebuffering {
+                    applyAudioClockAction(sourceDry: readAhead?.isDry)
+                }
                 diag?.update(lastAudioPts: lastEnqueuedAudioPtsSec,
                              parked: parkedVideo.count, rebuffering: rebufferGate.rebuffering,
                              generation: parkedSeekGeneration)
@@ -2221,13 +2226,28 @@ final class SoftwarePlaybackHost {
             }
         }
 
+        // Rate samples only count while the producer is free to read, so a full window never
+        // reads as a slow source.
+        func sourceFill(clock: Double) -> SoftwareVODRebufferGate.SourceFill? {
+            guard let readAhead, clock.isFinite else { return nil }
+            let state = readAhead.fillState
+            guard let newest = state.newestSeconds else { fillMeter.reset(); return nil }
+            if state.canGrow {
+                fillMeter.record(mediaSeconds: newest, at: ProcessInfo.processInfo.systemUptime)
+            } else {
+                fillMeter.reset()
+            }
+            return .init(bufferedLead: newest - clock, fillRate: fillMeter.rate, canGrow: state.canGrow)
+        }
+
         func applyAudioClockAction(sourceDry: Bool?) {
             guard decoupleAudio, clockArmed(), let aOut = audioOutput else { return }
-            let lead = lastEnqueuedAudioPtsSec.isFinite
-                ? lastEnqueuedAudioPtsSec - aOut.currentTimeSeconds : 0
+            let clock = aOut.currentTimeSeconds
+            let lead = lastEnqueuedAudioPtsSec.isFinite ? lastEnqueuedAudioPtsSec - clock : 0
+            let fill = sourceFill(clock: clock)
             switch rebufferGate.evaluate(
                 lead: lead, isPlaying: isPlaying(), sourceDry: sourceDry,
-                parkedCount: parkedVideo.count
+                parkedCount: parkedVideo.count, fill: fill
             ) {
             case .pauseForRebuffer:
                 EngineLog.emit(
@@ -2238,7 +2258,9 @@ final class SoftwarePlaybackHost {
                 aOut.pause()
             case .resume:
                 EngineLog.emit(
-                    "[SWHost] rebuffered to \(String(format: "%.2f", lead))s audio lead; "
+                    "[SWHost] rebuffered to \(String(format: "%.2f", lead))s audio lead, "
+                    + "\(fill.map { String(format: "%.1f", $0.bufferedLead) } ?? "n/a")s stored, "
+                    + "fill rate \(fill?.fillRate.map { String(format: "%.2f", $0) } ?? "n/a")x; "
                     + "resuming clock",
                     category: .swPlayback
                 )
@@ -2302,6 +2324,7 @@ final class SoftwarePlaybackHost {
                     freeParkedVideo()
                     lastEnqueuedAudioPtsSec = .nan
                     rebufferGate.reset()
+                    fillMeter.reset()
                 }
                 drainParkedVideoNonblocking()
                 applyAudioClockAction(sourceDry: readAhead?.isDry)

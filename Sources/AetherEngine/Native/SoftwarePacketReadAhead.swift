@@ -65,6 +65,9 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
     /// limit in force on material the coverage model cannot describe.
     private var storedVideoSeconds: Double?
     private var consumedVideoSeconds: Double?
+    /// Newest decode-or-presentation time stored per stream; AVI video carries no pts at all.
+    private var newestVideoTimestamp: Double?
+    private var newestAudioTimestamp: Double?
     private var videoCoverage = SoftwarePacketCoverage()
     private var audioCoverage = SoftwarePacketCoverage()
     private var presentationCoverage: SoftwareVideoPacketCoverage?
@@ -125,6 +128,22 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
     var isDry: Bool {
         condition.lock(); defer { condition.unlock() }
         return count == 0 && !ended && failure == nil && !closed && !seeking
+    }
+
+    /// Newest stored video time, and whether the producer can still add to it. Cheap: no coverage walk.
+    /// Newest time stored for every selected stream, and whether the producer can still add to it.
+    var fillState: (newestSeconds: Double?, canGrow: Bool) {
+        condition.lock(); defer { condition.unlock() }
+        let parked = sourceRepositioning || ended || failure != nil || closed || shouldParkLocked()
+        let newest: Double?
+        if seeking || sourceRepositioning {
+            newest = nil
+        } else if audio != nil {
+            newest = newestAudioTimestamp.flatMap { a in newestVideoTimestamp.map { min(a, $0) } }
+        } else {
+            newest = newestVideoTimestamp
+        }
+        return (newest, !parked)
     }
 
     func waitWhileDry(timeout: TimeInterval) {
@@ -339,7 +358,24 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         ended = false; failure = nil
         videoCoverage.reset(); audioCoverage.reset(); presentationCoverage?.reset()
         storedVideoSeconds = nil; consumedVideoSeconds = nil
+        newestVideoTimestamp = nil; newestAudioTimestamp = nil
         keyframes.removeAll(keepingCapacity: true)
+    }
+
+    private func noteNewestTimestampLocked(_ packet: SoftwareStoredPacket) {
+        let stream: Stream
+        if packet.streamIndex == video.index { stream = video }
+        else if let audio, packet.streamIndex == audio.index { stream = audio }
+        else { return }
+        let ts = packet.pts != Int64.min ? packet.pts : packet.dts
+        guard ts != Int64.min, stream.numerator > 0, stream.denominator > 0 else { return }
+        let seconds = Double(ts) * Double(stream.numerator) / Double(stream.denominator)
+        guard seconds.isFinite else { return }
+        if stream.index == video.index {
+            newestVideoTimestamp = max(newestVideoTimestamp ?? seconds, seconds)
+        } else {
+            newestAudioTimestamp = max(newestAudioTimestamp ?? seconds, seconds)
+        }
     }
 
     /// Presentation seconds of a stored packet, or nil when this stream cannot express them.
@@ -430,6 +466,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
                     condition.lock()
                     if token == sourceEpoch, !closed, !sourceRepositioning {
                         copyDiskStateLocked(state)
+                        noteNewestTimestampLocked(packet)
                         if packet.streamIndex == video.index {
                             if presentationCoverage != nil {
                                 presentationCoverage?.insert(pts: packet.pts)
