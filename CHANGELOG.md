@@ -10,7 +10,17 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+## [6.88.0-tvseerr.1] - 2026-09-29 (fork)
+
+### Fixed
+
+- **The software path holds its clock on a starved VOD source instead of playing through it.** A
+  source slower than the bitrate from the first second never armed the hold (it waited for a lead of
+  2 s that never came), so the clock ran on with no data: audio lead to -13 s, video in bursts. The
+  hold now engages when the packet store is dry and the audio lead is spent, is checked while the
+  read waits rather than after it, keeps reading past the 256-packet video FIFO under the hold
+  (bounded at 1024 packets / 48 MiB, then released with hysteresis instead of flapping), drops on a
+  host pause, and is published as `playbackPhase == .rebuffering`.
 
 ## [6.88.0] - 2026-09-15
 

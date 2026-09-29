@@ -55,6 +55,7 @@ final class SoftwarePlaybackHost {
     /// #376: carries the classification with the message, so the engine can publish both.
     @Published private(set) var failure: PlaybackErrorInfo?
     @Published private(set) var didReachEnd: Bool = false
+    @Published private(set) var isRebuffering: Bool = false
 
     /// #315: `AVSampleBufferDisplayLayer.isReadyForDisplay` for the renderer's layer, this path's
     /// answer to "there is a picture". Frames enqueued is not that answer: it counts what the
@@ -2173,7 +2174,7 @@ final class SoftwarePlaybackHost {
         // The one place the loop waits on the renderer. A rebuffer hold stops the synchronizer,
         // and a stopped synchronizer never drains the renderer: this thread is the only one that
         // could lift the hold, so waiting under it waits forever (the DVR arm may wait because
-        // its pump runs on a second thread). Lift first, then wait.
+        // its pump runs on a second thread). Lift at the gate's backstop, then wait.
         func waitForRenderer(_ reason: ParkWait) {
             func stillWaiting() -> Bool {
                 switch reason {
@@ -2316,6 +2317,17 @@ final class SoftwarePlaybackHost {
                     clockSeconds: audioOutput?.currentTimeSeconds ?? .nan) {
                     waitForRenderer(.readGate)
                     return true
+                }
+                if let readAhead {
+                    let dryGeneration = seekGeneration()
+                    while readAhead.isDry, !stopRequested(), admitsRead(dryGeneration) {
+                        readAhead.waitWhileDry(timeout: 0.02)
+                        drainParkedVideoNonblocking()
+                        applyAudioClockAction(sourceDry: readAhead.isDry)
+                        diag?.update(lastAudioPts: lastEnqueuedAudioPtsSec,
+                                     parked: parkedVideo.count, rebuffering: rebufferGate.rebuffering,
+                                     generation: parkedSeekGeneration)
+                    }
                 }
             }
 
@@ -2631,6 +2643,8 @@ final class SoftwarePlaybackHost {
                 guard let self else { return }
                 // Independent of the clock below: a seek in flight must not defer the one check.
                 self.checkSurfaceVisibilityIfDue()
+                let holding = self.demuxDiag.snapshot.rebuffering
+                if self.isRebuffering != holding { self.isRebuffering = holding }
                 guard let aOut = self.audioOutput else { return }
                 // #254: a reposition in flight holds `currentTime` at its target; the synchronizer is
                 // still on the pre-seek anchor and would drag the published position backwards.

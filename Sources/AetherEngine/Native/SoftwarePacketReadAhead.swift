@@ -124,7 +124,16 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
 
     var isDry: Bool {
         condition.lock(); defer { condition.unlock() }
-        return count == 0 && !ended && failure == nil && !closed
+        return count == 0 && !ended && failure == nil && !closed && !seeking
+    }
+
+    func waitWhileDry(timeout: TimeInterval) {
+        condition.lock(); defer { condition.unlock() }
+        guard count == 0, !ended, failure == nil, !closed, !seeking else { return }
+        waitingConsumers += 1
+        condition.broadcast()
+        _ = condition.wait(until: Date(timeIntervalSinceNow: timeout))
+        waitingConsumers -= 1
     }
 
     /// Main-thread safe: metadata only. Decode/render backpressure still belongs to the old loop.
