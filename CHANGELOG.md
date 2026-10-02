@@ -10,6 +10,26 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [6.88.0-tvseerr.3] - 2026-10-02 (fork)
+
+### Added
+
+- **TrueHD Atmos objects to a 7.1.4 bed, delivered as APAC** (`LoadOptions.objectAudioRendering =
+  .apac714`, default `.off`; native path, tvOS/macOS 26). One attempt before the bridge cascade:
+  TrueHD with the Atmos profile at 48 kHz is decoded with objects by TrueHDObjects (our C API over
+  the `truehd` crate, `kirillvoronin/TrueHDObjects` 0.1.2), panned into 7.1.4 by dual balance in the
+  room cube (after ITU-R BS.2127; size, snap, zones, elevation), mixed with per-update gains and
+  linear ramps (Accelerate), and encoded by `AVAudioConverter` to APAC at 320 kbit/s per channel with
+  DRC off. movenc writes a placeholder ALAC track; the init's sample entry is swapped for `apac` +
+  `dapa` as AVAssetWriter writes it; the master playlist says `apac.31.03`. Packets keep the 2048
+  frames of priming and are stamped from the run's anchor, which AVFoundation plays on the source
+  time (measured 0.02 ms off; without the priming packets 42.6 ms early). Lost or damaged input is
+  silence in place; repeated failures reload the session with the option off (lossless bridge).
+- `SegmentAudioBridge`: the producer's bridge interface, now shared by `AudioBridge` (unchanged) and
+  `ObjectAudioBridge`.
+- `Probes/APACProbe`: measures the APAC encoder (packet, priming, latency per DRC setting, bitrate,
+  packet independence, cookie).
+
 ## [6.88.0-tvseerr.2] - 2026-09-29 (fork)
 
 ### Changed

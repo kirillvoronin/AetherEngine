@@ -841,6 +841,11 @@ public struct LoadOptions: Sendable, Equatable {
     /// host's subtitle authority flag carries over. Consumed by the load; never persisted.
     var subtitleSessionCarryover: SubtitleSessionCarryover? = nil
 
+    /// TVSeerr fork: render TrueHD Atmos objects into a 7.1.4 bed delivered as APAC (tvOS 26+).
+    /// Native path only; anything that refuses or fails falls back to `audioBridgeMode`. Off by
+    /// default, and the engine turns it off itself when the path keeps failing mid-session.
+    public var objectAudioRendering: ObjectAudioRendering = .off
+
     public init(
         omitCriteriaColorExtensions: Bool = false,
         suppressDisplayCriteria: Bool = false,

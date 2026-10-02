@@ -246,6 +246,15 @@ extension HLSVideoEngine {
             )
         }
 
+        if !forcedDrop, let audioStream = sourceAudioStream, sourceAudioStreamIndex >= 0,
+           let prod = buildObjectAudioProducer(
+               audioStream: audioStream,
+               sourceAudioStreamIndex: sourceAudioStreamIndex,
+               audioHLSCodecs: &audioHLSCodecs,
+               audioLanguage: audioLanguage) {
+            return prod
+        }
+
         if !forcedDrop, let audioStream = sourceAudioStream, sourceAudioStreamIndex >= 0 {
             // #165: cascade across bridge encoders. The encoder the configured mode resolves to for this
             // source can be absent from the FFmpeg build (custom builds without --enable-encoder=eac3);

@@ -751,6 +751,7 @@ extension AetherEngine {
             panelIsInHDRMode: panelIsInHDRMode,
             audioSourceStreamIndexOverride: audioSourceStreamIndex,
             audioBridgeMode: audioBridgeMode,
+            objectAudioRendering: loadedOptions.objectAudioRendering,
             isLiveSession: isLive,
             dvrWindowSeconds: dvrWindowSeconds,
             // AE#195/#208: the session resolves the cut target and enables the bounded first-manifest
@@ -954,6 +955,22 @@ extension AetherEngine {
         // #126: zero-progress VOD pump death (readError before any packet/segment), and #169:
         // mid-session readError after the revive cap. Without this the host sees
         // isPlayable=true / a stalled item and waits until its own timeout.
+        session.onObjectAudioGaveUp = { [weak self, weak session] reason in
+            Task { @MainActor in
+                guard let self, let session, self.nativeVideoSession === session,
+                      self.loadedOptions.objectAudioRendering != .off else { return }
+                EngineLog.emit(
+                    "[AetherEngine] object audio gave up (\(reason)); reloading on the lossless bridge",
+                    category: .session
+                )
+                do {
+                    try await self.reloadAtCurrentPosition { $0.objectAudioRendering = .off }
+                } catch {
+                    EngineLog.emit("[AetherEngine] object audio fallback reload failed: \(error)",
+                                   category: .session)
+                }
+            }
+        }
         session.onVODSourceFailed = { [weak self, weak session] code, reason, kind in
             Task { @MainActor in
                 guard let self, let session, self.nativeVideoSession === session else {

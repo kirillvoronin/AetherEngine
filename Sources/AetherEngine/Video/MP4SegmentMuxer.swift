@@ -95,13 +95,17 @@ final class MP4SegmentMuxer {
         let timeBase: AVRational
         /// AE#458: ISO 639-2/T for the track's `mdhd`. Nil writes nothing, leaving movenc's `und`.
         let language: String?
+        /// Sample entry swapped into the finished init for a codec movenc cannot describe (APAC).
+        let sampleEntryReplacement: Data?
 
         init(codecpar: UnsafePointer<AVCodecParameters>,
              timeBase: AVRational,
-             language: String? = nil) {
+             language: String? = nil,
+             sampleEntryReplacement: Data? = nil) {
             self.codecpar = codecpar
             self.timeBase = timeBase
             self.language = language
+            self.sampleEntryReplacement = sampleEntryReplacement
         }
     }
 
@@ -250,6 +254,7 @@ final class MP4SegmentMuxer {
         let counter = ByteCounter()
         counter.fd = firstFd
         self.byteCounter = counter
+        let sampleEntryReplacement = audio?.sampleEntryReplacement
 
         self.splitter = FragmentSplitter(
             onHeaderComplete: { initBytes in
@@ -259,7 +264,20 @@ final class MP4SegmentMuxer {
                 // 7.1.5 shadowing the vendored build), whose init Apple TV would otherwise reject.
                 let clean = HLSVideoEngine.stripEmptyVideoSampleDependencyBox(fromInit: [UInt8](initBytes))
                     .map { Data($0) } ?? initBytes
-                onInitCaptured(clean)
+                guard let entry = sampleEntryReplacement else {
+                    onInitCaptured(clean)
+                    return
+                }
+                if let patched = InitSampleEntryPatch.replacingAudioSampleEntry(in: clean, with: entry) {
+                    onInitCaptured(patched)
+                } else {
+                    EngineLog.emit(
+                        "[MP4SegmentMuxer] ERROR: audio sample entry replacement found no audio stsd entry; "
+                        + "the init keeps the placeholder entry",
+                        category: .session
+                    )
+                    onInitCaptured(clean)
+                }
             },
             onFragmentBytes: { ptr, count in
                 guard !counter.writeFailed, counter.fd >= 0 else { return }

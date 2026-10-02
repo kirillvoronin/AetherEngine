@@ -1,5 +1,5 @@
 {
-  "originHash" : "4d55279f3b80a4c49d58c52465d158cb59cdb5b331a286ab26cbb7a713b339cc",
+  "originHash" : "198441e60722b6538005ad76a0dcf382fb4ff07e1e0a8ac55bd36bc2ec6b9775",
   "pins" : [
     {
       "identity" : "ffmpegbuild",
@@ -26,6 +26,15 @@
       "state" : {
         "revision" : "e636c2b2458930770932a36d311ec9d478575b90",
         "version" : "0.3.1"
+      }
+    },
+    {
+      "identity" : "truehdobjects",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/kirillvoronin/TrueHDObjects.git",
+      "state" : {
+        "revision" : "ee4240f8b365ca2459b98ab06f67cbc6a5d65d1c",
+        "version" : "0.1.2"
       }
     }
   ],
